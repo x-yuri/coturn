@@ -62,6 +62,15 @@ void set_log_to_syslog(int val);
 void set_simple_log(int val);
 
 void turn_log_func_default(TURN_LOG_LEVEL level, const s08bits* format, ...);
+void dlog(const char *format, ...);
+void inc_file_counter(char *path);
+char *ioa_addr_to_string_func(ioa_addr *a, char *buf, size_t sz);
+#define ioa_addr_to_string(a, buf) ioa_addr_to_string_func(a, buf, sizeof(buf))
+uint16_t ioa_addr_get_port(ioa_addr *a);
+#define strncpyex(dest, src, sz) \
+    strncpy(dest, src, sz - 1); \
+    if (sz > 0) \
+        dest[sz - 1]= '\0';
 
 void addr_debug_print(int verbose, const ioa_addr *addr, const s08bits* s);
 

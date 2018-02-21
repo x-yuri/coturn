@@ -146,6 +146,7 @@
 #define STUN_ATTRIBUTE_TRANSPORT_UDP_VALUE (17)
 #define STUN_ATTRIBUTE_TRANSPORT_TLS_VALUE (56)
 #define STUN_ATTRIBUTE_TRANSPORT_DTLS_VALUE (250)
+#define transport_to_string(t) (t) == STUN_ATTRIBUTE_TRANSPORT_TCP_VALUE ? "tcp" : (t) == STUN_ATTRIBUTE_TRANSPORT_UDP_VALUE ? "udp" : "other"
 /* <<== RFC 6062 */
 
 /* SHA ==>> */
