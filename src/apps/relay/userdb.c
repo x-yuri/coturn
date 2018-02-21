@@ -62,6 +62,9 @@
 
 #include "apputils.h"
 
+#include <sys/syscall.h>
+#define gettid() syscall(SYS_gettid)
+
 //////////// REALM //////////////
 
 static realm_params_t *default_realm_params_ptr = NULL;
@@ -546,6 +549,8 @@ int get_user_key(int in_oauth, int *out_oauth, int *max_session_time, u08bits *u
 
 		ts = get_rest_api_timestamp((char*)usname);
 
+        dbgprintf("%li: get_user_key: turn_time_before: %u, %u, %i\n",
+            gettid(), ts, ctime, turn_time_before(ts, ctime));
 		if(!turn_time_before(ts, ctime)) {
 
 			u08bits hmac[MAXSHASIZE];

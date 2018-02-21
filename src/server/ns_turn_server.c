@@ -34,6 +34,8 @@
 #include "ns_turn_allocation.h"
 #include "ns_turn_msg_addr.h"
 #include "ns_turn_ioalib.h"
+#include <sys/syscall.h>
+#define gettid() syscall(SYS_gettid)
 
 ///////////////////////////////////////////
 
@@ -3202,6 +3204,7 @@ static int create_challenge_response(ts_ur_super_session *ss, stun_tid *tid, int
 static void resume_processing_after_username_check(int success,  int oauth, int max_session_time, hmackey_t hmackey, password_t pwd, turn_turnserver *server, u64bits ctxkey, ioa_net_data *in_buffer, u08bits *realm)
 {
 
+    dbgprintf("%li: resume_processing_after_username_check\n", gettid());
 	if(server && in_buffer && in_buffer->nbh) {
 
 		ts_ur_super_session *ss = get_session_from_map(server,(turnsession_id)ctxkey);
@@ -3221,6 +3224,7 @@ static void resume_processing_after_username_check(int success,  int oauth, int 
 				}
 			}
 
+            dbgprintf("%li: resume_processing_after_username_check: read_client_connection\n", gettid());
 			read_client_connection(server,ss,in_buffer,0,0);
 
 			close_ioa_socket_after_processing_if_necessary(ss->client_socket);
@@ -3244,8 +3248,10 @@ static int check_stun_auth(turn_turnserver *server,
 	u08bits realm[STUN_MAX_REALM_SIZE+1];
 	size_t alen = 0;
 
+    dbgprintf("%li: check_stun_auth\n", gettid());
 	if(!need_stun_authentication(server, ss))
 		return 0;
+    dbgprintf("%li: check_stun_auth: needs authentication\n", gettid());
 
 	int new_nonce = 0;
 
@@ -3263,6 +3269,7 @@ static int check_stun_auth(turn_turnserver *server,
 		}
 
 		if(generate_new_nonce) {
+            dbgprintf("%li: check_stun_auth: generate new nonce\n", gettid());
 
 			int i = 0;
 
@@ -3285,12 +3292,14 @@ static int check_stun_auth(turn_turnserver *server,
 
 	/* MESSAGE_INTEGRITY ATTR: */
 
+    dbgprintf("%li: check_stun_auth: get message integrity attr\n", gettid());
 	stun_attr_ref sar = stun_attr_get_first_by_type_str(ioa_network_buffer_data(in_buffer->nbh),
 							    ioa_network_buffer_get_size(in_buffer->nbh),
 							    STUN_ATTRIBUTE_MESSAGE_INTEGRITY);
 
 	if(!sar) {
 		*err_code = 401;
+        dbgprintf("%li: check_stun_auth: create_challenge_response (!sar)\n", gettid());
 		return create_challenge_response(ss,tid,resp_constructed,err_code,reason,nbh,method);
 	}
 
@@ -3305,6 +3314,7 @@ static int check_stun_auth(turn_turnserver *server,
 		case SHA512SIZEBYTES:
 		default:
 			*err_code = 401;
+            dbgprintf("%li: check_stun_auth: create_challenge_response (wrong len)\n", gettid());
 			return create_challenge_response(ss,tid,resp_constructed,err_code,reason,nbh,method);
 		};
 	}
@@ -3325,6 +3335,7 @@ static int check_stun_auth(turn_turnserver *server,
 		alen = min((size_t)stun_attr_get_len(sar),sizeof(realm)-1);
 		ns_bcopy(stun_attr_get_value(sar),realm,alen);
 		realm[alen]=0;
+        dbgprintf("%li: check_stun_auth: realm: %s\n", gettid(), realm);
 
 		if(method == STUN_METHOD_CONNECTION_BIND) {
 
@@ -3360,6 +3371,7 @@ static int check_stun_auth(turn_turnserver *server,
 	alen = min((size_t)stun_attr_get_len(sar),sizeof(usname)-1);
 	ns_bcopy(stun_attr_get_value(sar),usname,alen);
 	usname[alen]=0;
+    dbgprintf("%li: check_stun_auth: user: %s\n", gettid(), usname);
 
 	if(!is_secure_username(usname)) {
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "%s: wrong username: %s\n", __FUNCTION__, (char*)usname);
@@ -3400,26 +3412,32 @@ static int check_stun_auth(turn_turnserver *server,
 		alen = min((size_t)stun_attr_get_len(sar),sizeof(nonce)-1);
 		ns_bcopy(stun_attr_get_value(sar),nonce,alen);
 		nonce[alen]=0;
+        dbgprintf("%li: check_stun_auth: nonce: %s\n", gettid(), nonce);
 
 		/* Stale Nonce check: */
 
 		if(new_nonce) {
 			*err_code = 438;
 			*reason = (const u08bits*)"Wrong nonce";
+            dbgprintf("%li: check_stun_auth: create_challenge_response\n", gettid());
 			return create_challenge_response(ss,tid,resp_constructed,err_code,reason,nbh,method);
 		}
 
 		if(strcmp((s08bits*)ss->nonce,(s08bits*)nonce)) {
 			*err_code = 438;
 			*reason = (const u08bits*)"Stale nonce";
+            dbgprintf("%li: check_stun_auth: create_challenge_response\n", gettid());
 			return create_challenge_response(ss,tid,resp_constructed,err_code,reason,nbh,method);
 		}
 	}
 
 	/* Password */
 	if(!(ss->hmackey_set) && (ss->pwd[0] == 0)) {
+        dbgprintf("%li: check_stun_auth: ! hmackey && empty pass\n", gettid());
 		if(can_resume) {
+            dbgprintf("%li: check_stun_auth: start_user_check\n", gettid());
 			(server->userkeycb)(server->id, server->ct, server->oauth, &(ss->oauth), usname, realm, resume_processing_after_username_check, in_buffer, ss->id, postpone_reply);
+            dbgprintf("%li: check_stun_auth: postpone_reply: %i\n", gettid(), *postpone_reply);
 			if(*postpone_reply) {
 				return 0;
 			}
@@ -3429,6 +3447,7 @@ static int check_stun_auth(turn_turnserver *server,
 				"%s: Cannot find credentials of user <%s>\n",
 				__FUNCTION__, (char*)usname);
 		*err_code = 401;
+        dbgprintf("%li: check_stun_auth: create_challenge_response\n", gettid());
 		return create_challenge_response(ss,tid,resp_constructed,err_code,reason,nbh,method);
 	}
 
@@ -3438,6 +3457,7 @@ static int check_stun_auth(turn_turnserver *server,
 					  ss->hmackey,
 					  ss->pwd,
 					  SHATYPE_DEFAULT)<1) {
+        dbgprintf("%li: check_stun_auth: message integrity check failed\n", gettid());
 
 		if(can_resume) {
 			(server->userkeycb)(server->id, server->ct, server->oauth, &(ss->oauth), usname, realm, resume_processing_after_username_check, in_buffer, ss->id, postpone_reply);
@@ -3450,6 +3470,7 @@ static int check_stun_auth(turn_turnserver *server,
 				"%s: user %s credentials are incorrect\n",
 				__FUNCTION__, (char*)usname);
 		*err_code = 401;
+        dbgprintf("%li: check_stun_auth: create_challenge_response\n", gettid());
 		return create_challenge_response(ss,tid,resp_constructed,err_code,reason,nbh,method);
 	}
 
@@ -3504,6 +3525,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 	int no_response = 0;
 	int message_integrity = 0;
 
+    dbgprintf("%li: handle_turn_command\n", gettid());
 	if(!(ss->client_socket))
 		return -1;
 
@@ -3511,6 +3533,8 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 	u16bits ua_num = 0;
 	u16bits method = stun_get_method_str(ioa_network_buffer_data(in_buffer->nbh), 
 					     ioa_network_buffer_get_size(in_buffer->nbh));
+    dbgprintf("%li: handle_turn_command: method: %s\n",
+        gettid(), stun_method_to_str(method));
 
 	*resp_constructed = 0;
 
@@ -3521,6 +3545,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 	if (stun_is_request_str(ioa_network_buffer_data(in_buffer->nbh), 
 				ioa_network_buffer_get_size(in_buffer->nbh))) {
 
+        dbgprintf("%li: handle_turn_command: request\n", gettid());
 		if((method == STUN_METHOD_BINDING) && (*(server->no_stun))) {
 
 			no_response = 1;
@@ -3668,7 +3693,10 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 					;
 				} else if(!(*(server->mobility)) || (method != STUN_METHOD_REFRESH) || is_allocation_valid(get_allocation_ss(ss))) {
 					int postpone_reply = 0;
+                    dbgprintf("%li: handle_turn_command: request: check_stun_auth\n", gettid());
 					check_stun_auth(server, ss, &tid, resp_constructed, &err_code, &reason, in_buffer, nbh, method, &message_integrity, &postpone_reply, can_resume);
+                    dbgprintf("%li: handle_turn_command: request: check_stun_auth: postpone: %i\n",
+                        gettid(), postpone_reply);
 					if(postpone_reply)
 						no_response = 1;
 				}
@@ -3682,6 +3710,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 			case STUN_METHOD_ALLOCATE:
 
 			{
+                dbgprintf("%li: handle_turn_command: request: allocate\n", gettid());
 				handle_turn_allocate(server, ss, &tid, resp_constructed, &err_code, &reason,
 							unknown_attrs, &ua_num, in_buffer, nbh);
 
@@ -3694,6 +3723,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 
 			case STUN_METHOD_CONNECT:
 
+                dbgprintf("%li: handle_turn_command: request: connect\n", gettid());
 				handle_turn_connect(server, ss, &tid, &err_code, &reason,
 							unknown_attrs, &ua_num, in_buffer);
 
@@ -3708,6 +3738,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 
 			case STUN_METHOD_CONNECTION_BIND:
 
+                dbgprintf("%li: handle_turn_command: request: connection bind\n", gettid());
 				handle_turn_connection_bind(server, ss, &tid, resp_constructed, &err_code, &reason,
 								unknown_attrs, &ua_num, in_buffer, nbh, message_integrity, can_resume);
 
@@ -3719,6 +3750,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 
 			case STUN_METHOD_REFRESH:
 
+                dbgprintf("%li: handle_turn_command: request: refresh\n", gettid());
 				handle_turn_refresh(server, ss, &tid, resp_constructed, &err_code, &reason,
 								unknown_attrs, &ua_num, in_buffer, nbh, message_integrity,
 								&no_response, can_resume);
@@ -3730,6 +3762,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 
 			case STUN_METHOD_CHANNEL_BIND:
 
+                dbgprintf("%li: handle_turn_command: request: channel bind\n", gettid());
 				handle_turn_channel_bind(server, ss, &tid, resp_constructed, &err_code, &reason,
 								unknown_attrs, &ua_num, in_buffer, nbh);
 
@@ -3740,6 +3773,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 
 			case STUN_METHOD_CREATE_PERMISSION:
 
+                dbgprintf("%li: handle_turn_command: request: create permission\n", gettid());
 				handle_turn_create_permission(server, ss, &tid, resp_constructed, &err_code, &reason,
 								unknown_attrs, &ua_num, in_buffer, nbh);
 
@@ -3756,6 +3790,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 				int dest_changed=0;
 				ioa_addr response_destination;
 
+                dbgprintf("%li: handle_turn_command: request: binding\n", gettid());
 				handle_turn_binding(server, ss, &tid, resp_constructed, &err_code, &reason,
 							unknown_attrs, &ua_num, in_buffer, nbh,
 							&origin_changed, &response_origin,
@@ -3780,6 +3815,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 						ioa_network_buffer_set_size(nbh, len);
 					}
 
+                    dbgprintf("%li: handle_turn_command: request: binding: send_turn_message_to\n", gettid());
 					send_turn_message_to(server, nbh, &response_origin, &response_destination);
 
 					no_response = 1;
@@ -3795,6 +3831,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 	} else if (stun_is_indication_str(ioa_network_buffer_data(in_buffer->nbh), 
 					  ioa_network_buffer_get_size(in_buffer->nbh))) {
 
+        dbgprintf("%li: handle_turn_command: indication\n", gettid());
 		no_response = 1;
 		int postpone = 0;
 
@@ -3803,11 +3840,13 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 			switch (method){
 
 			case STUN_METHOD_BINDING:
+                dbgprintf("%li: handle_turn_command: indication: binding\n", gettid());
 				//ICE ?
 				break;
 
 			case STUN_METHOD_SEND:
 
+                dbgprintf("%li: handle_turn_command: indication: send\n", gettid());
 				handle_turn_send(server, ss, &err_code, &reason, unknown_attrs, &ua_num, in_buffer);
 
 				if(eve(server->verbose)) {
@@ -3818,6 +3857,7 @@ static int handle_turn_command(turn_turnserver *server, ts_ur_super_session *ss,
 
 			case STUN_METHOD_DATA:
 
+                dbgprintf("%li: handle_turn_command: indication: data\n", gettid());
 				err_code = 403;
 
 				if(eve(server->verbose)) {
@@ -4413,6 +4453,7 @@ static int read_client_connection(turn_turnserver *server,
 
 	FUNCSTART;
 
+    dbgprintf("%li: read_client_connection\n", gettid());
 	if (!server || !ss || !in_buffer || !(ss->client_socket) || ss->to_be_closed || ioa_socket_tobeclosed(ss->client_socket)) {
 		FUNCEND;
 		return -1;
@@ -4448,6 +4489,7 @@ static int read_client_connection(turn_turnserver *server,
 
 	if(sat == HTTP_CLIENT_SOCKET) {
 
+        dbgprintf("%li: read_client_connection: http client\n", gettid());
 		if(server->verbose) {
 			TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "%s: HTTP connection input: %s\n", __FUNCTION__, (char*)ioa_network_buffer_data(in_buffer->nbh));
 		}
@@ -4456,6 +4498,7 @@ static int read_client_connection(turn_turnserver *server,
 
 	} else if(sat == HTTPS_CLIENT_SOCKET) {
 
+        dbgprintf("%li: read_client_connection: https client\n", gettid());
 		//???
 
 	} else if (stun_is_channel_message_str(ioa_network_buffer_data(in_buffer->nbh),
@@ -4463,6 +4506,7 @@ static int read_client_connection(turn_turnserver *server,
 					&chnum,
 					is_padding_mandatory)) {
 
+        dbgprintf("%li: read_client_connection: channel message\n", gettid());
 		if(ss->is_tcp_relay) {
 			//Forbidden
 			FUNCEND;
@@ -4473,6 +4517,7 @@ static int read_client_connection(turn_turnserver *server,
 
 		if(blen<=orig_blen) {
 			ioa_network_buffer_set_size(in_buffer->nbh,blen);
+            dbgprintf("%li: read_client_connection: channel message: reply\n", gettid());
 			rc = write_to_peerchannel(ss, chnum, in_buffer);
 		}
 
@@ -4486,12 +4531,16 @@ static int read_client_connection(turn_turnserver *server,
 
 	} else if (stun_is_command_message_full_check_str(ioa_network_buffer_data(in_buffer->nbh), ioa_network_buffer_get_size(in_buffer->nbh), 0, &(ss->enforce_fingerprints))) {
 
+        dbgprintf("%li: read_client_connection: command\n", gettid());
 		ioa_network_buffer_handle nbh = ioa_network_buffer_allocate(server->e);
 		int resp_constructed = 0;
 
 		u16bits method = stun_get_method_str(ioa_network_buffer_data(in_buffer->nbh),
 						ioa_network_buffer_get_size(in_buffer->nbh));
+        dbgprintf("%li: read_client_connection: command: method: %s\n",
+            gettid(), stun_method_to_str(method));
 
+        dbgprintf("%li: read_client_connection: command: handle_turn_command\n", gettid());
 		handle_turn_command(server, ss, in_buffer, nbh, &resp_constructed, can_resume);
 
 		if((method != STUN_METHOD_BINDING) && (method != STUN_METHOD_SEND))
@@ -4515,6 +4564,7 @@ static int read_client_connection(turn_turnserver *server,
 				ioa_network_buffer_set_size(nbh, len);
 			}
 
+            dbgprintf("%li: read_client_connection: command: reply\n", gettid());
 			int ret = write_client_connection(server, ss, nbh, TTL_IGNORE, TOS_IGNORE);
 
 			FUNCEND	;
@@ -4526,13 +4576,16 @@ static int read_client_connection(turn_turnserver *server,
 
 	} else if (old_stun_is_command_message_str(ioa_network_buffer_data(in_buffer->nbh), ioa_network_buffer_get_size(in_buffer->nbh), &old_stun_cookie) && !(*(server->no_stun))) {
 
+        dbgprintf("%li: read_client_connection: command (old)\n", gettid());
 		ioa_network_buffer_handle nbh = ioa_network_buffer_allocate(server->e);
 		int resp_constructed = 0;
 
+        dbgprintf("%li: read_client_connection: command (old): handle_old_stun_command\n", gettid());
 		handle_old_stun_command(server, ss, in_buffer, nbh, &resp_constructed, old_stun_cookie);
 
 		if (resp_constructed) {
 
+            dbgprintf("%li: read_client_connection: command (old): reply\n", gettid());
 			int ret = write_client_connection(server, ss, nbh, TTL_IGNORE, TOS_IGNORE);
 
 			FUNCEND	;
@@ -4543,6 +4596,7 @@ static int read_client_connection(turn_turnserver *server,
 		}
 
 	} else {
+        dbgprintf("%li: read_client_connection: else\n", gettid());
 		if (server->use_http) {
 			SOCKET_TYPE st = get_ioa_socket_type(ss->client_socket);
 			if(is_stream_socket(st)) {
@@ -4613,6 +4667,9 @@ int open_client_connection_session(turn_turnserver* server,
 				struct socket_message *sm) {
 
 	FUNCSTART;
+    char _b[80];
+    (void)_b;   // in case dbgprintf expands to nothing
+    dbgprintf("%li: open_client_connection_session\n", gettid());
 	if (!server)
 		return -1;
 
@@ -4639,8 +4696,12 @@ int open_client_connection_session(turn_turnserver* server,
 			at, 0,
 			client_to_be_allocated_timeout_handler, ss, 1,
 			"client_to_be_allocated_timeout_handler");
+    _print_session(
+        snprintfex(_b, "%li: open_client_connection_session", gettid()),
+        ss);
 
 	if(sm->nd.nbh) {
+        dbgprintf("%li: open_client_connection_session: client_input_handler\n", gettid());
 		client_input_handler(ss->client_socket,IOA_EV_READ,&(sm->nd),ss,sm->can_resume);
 		ioa_network_buffer_delete(server->e, sm->nd.nbh);
 		sm->nd.nbh = NULL;
@@ -4768,6 +4829,7 @@ static void peer_input_handler(ioa_socket_handle s, int event_type,
 static void client_input_handler(ioa_socket_handle s, int event_type,
 		ioa_net_data *data, void *arg, int can_resume) {
 
+    dbgprintf("%li: client_input_handler\n", gettid());
 	if (!arg)
 		return;
 
@@ -4786,6 +4848,7 @@ static void client_input_handler(ioa_socket_handle s, int event_type,
 		return;
 	}
 
+    dbgprintf("%li: client_input_handler: read_client_connection\n", gettid());
 	read_client_connection(server, ss, data, can_resume, 1);
 
 	if (ss->to_be_closed) {

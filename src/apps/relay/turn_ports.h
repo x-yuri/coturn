@@ -55,7 +55,7 @@ turnipports* turnipports_create(super_memory_t *sm, u16bits start, u16bits end);
 
 void turnipports_add_ip(u08bits transport, const ioa_addr *backend_addr);
 
-int turnipports_allocate(turnipports* tp, u08bits transport, const ioa_addr *backend_addr);
+int turnipports_allocate(turnipports* tp, u08bits transport, const ioa_addr *backend_addr, uint16_t remote_port);
 int turnipports_allocate_even(turnipports* tp, const ioa_addr *backend_addr, 
 			      int allocate_rtcp, u64bits *reservation_token);
 

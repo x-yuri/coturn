@@ -349,11 +349,14 @@ static void sighup_callback_handler(int signum)
 	}
 }
 
+static void close_dlog(void);
+
 static void set_rtpfile(void)
 {
 	if(to_reset_log_file) {
 		printf("%s: resetting the log file\n",__FUNCTION__);
 		reset_rtpprintf();
+        close_dlog();
 		to_reset_log_file = 0;
 	}
 
@@ -543,6 +546,338 @@ void rtpprintf(const char *format, ...)
 	va_start (args, format);
 	vrtpprintf(TURN_LOG_LEVEL_INFO, format, args);
 	va_end (args);
+}
+
+///////////// MY ///////////////////
+
+FILE *fp_dlog = NULL;
+
+#define E(callee) print_error(__FILE__, __LINE__, __func__, callee)
+#define LOC(callee) fprintf(stderr, "%s:%i: %s: %s\n", __FILE__, __LINE__, __func__, callee)
+
+static void print_error(char *file, int line, const char *caller, char *callee) {
+    int _errno;
+    char s[200];
+    int r;
+
+    _errno = errno;
+
+    r = snprintf(s, sizeof(s), "%s:%i: %s: %s", file, line, caller, callee);
+    if (r < 0) {
+        errno = _errno;
+        perror(callee);
+        return;
+    }
+
+    errno = _errno;
+    perror(s);
+}
+
+static int my_vsnprintf(char **str, size_t size_hint, const char *format, va_list args) {
+    int r;
+    va_list args2;
+
+    *str = turn_malloc(size_hint);
+    if (*str == NULL) {
+        E("malloc");
+        return 1;
+    }
+
+    va_copy(args2, args);
+
+    r = vsnprintf(*str, size_hint, format, args);
+    if ((unsigned)r + 1 > size_hint) {
+        free(*str);
+
+        *str = turn_malloc(r + 1);
+        if (*str == NULL) {
+            va_end(args2);
+            E("malloc");
+            return 1;
+        }
+
+        r = vsnprintf(*str, r + 1, format, args2);
+        if (r < 0) {
+            va_end(args2);
+            free(*str);
+            E("vsnprintf");
+            return 1;
+        }
+    } else if (r < 0) {
+        va_end(args2);
+        free(*str);
+        E("vsnprintf");
+        return 1;
+    }
+    va_end(args2);
+    return 0;
+}
+
+static int my_snprintf(char **str, size_t size_hint, const char *format, ...) {
+    va_list args;
+    int r;
+
+    va_start(args, format);
+
+    r = my_vsnprintf(str, size_hint, format, args);
+    if (r) {
+        LOC("my_vsnprintf");
+        va_end(args);
+        return 1;
+    }
+
+    va_end(args);
+    return 0;
+}
+
+#define SNPRINTFEX_MSG "<error>"
+char *snprintfex_func(char *str, size_t sz, const char *format, ...) {
+    va_list args;
+    int r;
+
+    va_start(args, format);
+
+    r = vsnprintf(str, sz, format, args);
+    if (r < 0) {
+        LOC("vsnprintf");
+        va_end(args);
+        strncpyex(str, SNPRINTFEX_MSG, sz);
+        return str;
+    }
+
+    va_end(args);
+    return str;
+}
+
+#define IOA_ADDR_TO_STRING_MSG "<error>"
+char *ioa_addr_to_string_func(ioa_addr *a, char *buf, size_t sz) {
+    char s[INET6_ADDRSTRLEN];
+    const char *s2;
+
+    if (!a) {
+        strncpyex(buf, IOA_ADDR_TO_STRING_MSG, sz);
+        return buf;
+    }
+
+    if (a->ss.sa_family == AF_INET)
+        s2 = inet_ntop(a->ss.sa_family, &a->s4.sin_addr, s, sizeof(s));
+    else if (a->ss.sa_family == AF_INET6)
+        s2 = inet_ntop(a->ss.sa_family, &a->s6.sin6_addr, s, sizeof(s));
+    else {
+        strncpyex(buf, IOA_ADDR_TO_STRING_MSG, sz);
+        return buf;
+    }
+
+    if (!s2) {
+        strncpyex(buf, IOA_ADDR_TO_STRING_MSG, sz);
+        return buf;
+    }
+
+    if (a->ss.sa_family == AF_INET)
+        snprintf(buf, sz, "%s:%hu", s, nswap16(a->s4.sin_port));
+    else if (a->ss.sa_family == AF_INET6)
+        snprintf(buf, sz, "%s:%hu", s, nswap16(a->s6.sin6_port));
+    else
+        strncpyex(buf, IOA_ADDR_TO_STRING_MSG, sz);
+    return buf;
+}
+
+uint16_t ioa_addr_get_port(ioa_addr *a) {
+    if (a->ss.sa_family == AF_INET)
+        return nswap16(a->s4.sin_port);
+    else if (a->ss.sa_family == AF_INET6)
+        return nswap16(a->s6.sin6_port);
+    else
+        return 0;
+}
+
+static int get_timestamp(char **timestamp) {
+    time_t t;
+    struct tm *tm;
+    char s[50];
+    int r;
+
+    t = time(NULL);
+    if (t == -1) {
+        E("time");
+        return 1;
+    }
+
+    tm = localtime(&t);
+    if (tm == NULL) {
+        E("localtime");
+        return 1;
+    }
+
+    r = strftime(s, sizeof(s), "%Y-%m-%d %H:%M:%S", tm);
+    if (r == 0) {
+        E("strftime");
+        return 1;
+    }
+
+    *timestamp = turn_strdup(s);
+    if (*timestamp == NULL) {
+        E("strdup");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int get_dlog(FILE **fp) {
+    if (fp_dlog) {
+        *fp = fp_dlog;
+        return 0;
+    }
+    fp_dlog = fopen("/var/log/dturn.log", "a");
+    if (fp_dlog == NULL) {
+        E("fopen");
+        return 1;
+    }
+    *fp = fp_dlog;
+    return 0;
+}
+
+static void close_dlog(void) {
+    int r;
+    log_lock();
+    r = fclose(fp_dlog);
+    if (r) {
+        E("fclose");
+    }
+    fp_dlog = NULL;
+    log_unlock();
+}
+
+void dlog(const char *format, ...) {
+    va_list args;
+    int r;
+    char *ts, *s, *s2;
+    FILE *dlog;
+
+    log_lock();
+
+	if(to_reset_log_file) {
+		printf("%s: resetting the log file\n",__FUNCTION__);
+		reset_rtpprintf();
+        close_dlog();
+		to_reset_log_file = 0;
+	}
+
+    r = get_timestamp(&ts);
+    if (r) {
+        log_unlock();
+        LOC("get_timestamp");
+        return;
+    }
+
+    va_start(args, format);
+
+    r = my_vsnprintf(&s, 1, format, args);
+    if (r) {
+        va_end(args);
+        free(ts);
+        log_unlock();
+        LOC("my_vsnprintf");
+        return;
+    }
+
+    va_end(args);
+
+    r = my_snprintf(&s2, 1, "%s: %s", ts, s);
+    if (r) {
+        free(s);
+        free(ts);
+        log_unlock();
+        LOC("my_snprintf");
+        return;
+    }
+
+    free(s);
+    free(ts);
+
+    r = get_dlog(&dlog);
+    if (r) {
+        free(s2);
+        log_unlock();
+        LOC("get_dlog");
+        return;
+    }
+
+    fprintf(dlog, "%s\n", s2);
+
+    free(s2);
+    log_unlock();
+}
+
+void inc_file_counter(char *path) {
+    FILE *fp;
+    int r;
+    unsigned long n_errors;
+    long pos;
+    int fd;
+
+    log_lock();
+
+    fp = fopen(path, "r+");
+    if (!fp && errno != ENOENT) {
+        perror("fopen");
+        log_unlock();
+        return;
+    }
+
+    if (!fp) {
+        fp = fopen(path, "w+");
+        if (!fp) {
+            perror("fopen");
+            log_unlock();
+            return;
+        }
+    }
+
+    r = fscanf(fp, "%lu", &n_errors);
+    if (r == EOF && ferror(fp)) {
+        perror("fscanf");
+        goto error;
+    }
+    if (r != 1)
+        n_errors = 0;
+
+    n_errors++;
+
+    rewind(fp);
+
+    r = fprintf(fp, "%lu", n_errors);
+    if (r < 0) {
+        perror("fprintf");
+        goto error;
+    }
+
+    pos = ftell(fp);
+    if (pos == -1) {
+        perror("ftell");
+        goto error;
+    }
+
+    fd = fileno(fp);
+    if (fd == -1) {
+        perror("fileno");
+        goto error;
+    }
+
+    r = ftruncate(fd, pos);
+    if (r == -1) {
+        perror("ftruncate");
+        goto error;
+    }
+
+error:
+    r = fclose(fp);
+    if (r) {
+        perror("fclose");
+    }
+
+    log_unlock();
 }
 
 ///////////// ORIGIN ///////////////////

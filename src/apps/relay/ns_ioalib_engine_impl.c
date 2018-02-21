@@ -996,12 +996,23 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 
 	size_t iip = 0;
 
+    dlog("%hu: create_relay_ioa_sockets: even_port: %i, transport: %s",
+        nswap16(client_s->remote_addr.s4.sin_port),
+        even_port, transport_to_string(transport));
+    char _s[60], _s2[60];
+    dlog("%hu: %s -> %s",
+        nswap16(client_s->remote_addr.s4.sin_port),
+        ioa_addr_to_string(&client_s->remote_addr, _s),
+        ioa_addr_to_string(&client_s->local_addr, _s2));
 	for (iip = 0; iip < e->relays_number; ++iip) {
 
 		ioa_addr relay_addr;
 		const ioa_addr *ra = ioa_engine_get_relay_addr(e, client_s, address_family, err_code);
 		if(ra)
 			addr_cpy(&relay_addr, ra);
+        dlog("%hu: %lu: ioa_engine_get_relay_addr: %s",
+            nswap16(client_s->remote_addr.s4.sin_port), iip,
+            ra && !*err_code ? "ok" : "error");
 
 		if(*err_code) {
 			if(*err_code == 440)
@@ -1026,7 +1037,10 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 			port = 0;
 			rtcp_port = -1;
 			if (even_port < 0) {
-				port = turnipports_allocate(tp, transport, &relay_addr);
+				port = turnipports_allocate(tp, transport, &relay_addr, nswap16(client_s->remote_addr.s4.sin_port));
+                dlog("%hu: %lu: %i: turnipports_allocate: %i",
+                    nswap16(client_s->remote_addr.s4.sin_port), iip, i,
+                    port);
 			} else {
 
 				port = turnipports_allocate_even(tp, &relay_addr, even_port, out_reservation_token);
@@ -1072,6 +1086,9 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 				*rtp_s = create_unbound_relay_ioa_socket(e, relay_addr.ss.sa_family,
 										(transport == STUN_ATTRIBUTE_TRANSPORT_TCP_VALUE) ? TCP_SOCKET : UDP_SOCKET,
 										RELAY_SOCKET);
+                dlog("%hu: %lu: %i: create_unbound_relay_ioa_socket: %s",
+                    nswap16(client_s->remote_addr.s4.sin_port), iip, i,
+                    *rtp_s ? "ok" : "error");
 				if (*rtp_s == NULL) {
 					int rtcp_bound = 0;
 					if (rtcp_s && *rtcp_s) {
@@ -1093,8 +1110,12 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 				addr_set_port(&local_addr, port);
 				if (bind_ioa_socket(*rtp_s, &local_addr,
 					(transport == STUN_ATTRIBUTE_TRANSPORT_TCP_VALUE)) >= 0) {
+                    dlog("%hu: %lu: %i: bind_ioa_socket: ok",
+                        nswap16(client_s->remote_addr.s4.sin_port), iip, i);
 					break;
 				} else {
+                    dlog("%hu: %lu: %i: bind_ioa_socket: error",
+                        nswap16(client_s->remote_addr.s4.sin_port), iip, i);
 					IOA_CLOSE_SOCKET(*rtp_s);
 					int rtcp_bound = 0;
 					if (rtcp_s && *rtcp_s) {
@@ -1119,6 +1140,8 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 		}
 
 		if (*rtp_s) {
+            dlog("%hu: %lu: found available port",
+                nswap16(client_s->remote_addr.s4.sin_port), iip);
 			addr_set_port(&local_addr, port);
 			addr_debug_print(e->verbose, &local_addr, "Local relay addr");
 			if (rtcp_s && *rtcp_s) {
@@ -1130,6 +1153,9 @@ int create_relay_ioa_sockets(ioa_engine_handle e,
 	}
 
 	if (!(*rtp_s)) {
+        inc_file_counter("/var/log/turn_n_errors");
+        dlog("%hu: no available ports",
+            nswap16(client_s->remote_addr.s4.sin_port));
 		TURN_LOG_FUNC(TURN_LOG_LEVEL_INFO, "%s: no available ports 3\n", __FUNCTION__);
 		IOA_CLOSE_SOCKET(*rtp_s);
 		if (rtcp_s)
@@ -3803,3 +3829,15 @@ void* allocate_super_memory_engine_func(ioa_engine_handle e, size_t size, const 
 }
 
 //////////////////////////////////////////////////
+
+void _print_session(char *prefix, ts_ur_super_session *s) {
+    char start_time[20];
+    (void)prefix; (void)s; (void)start_time;   // in case dbgprintf expands to nothing
+    if (!s)
+        return;
+    time_t t = s->start_time;
+    strftime(start_time, sizeof(start_time), "%Y-%m-%d %H:%M:%S", localtime(&t));
+    dbgprintf("%s: %lu, start time: %s, tcp relay: %i, user: %s\n",
+        prefix,
+        s->id, start_time, s->is_tcp_relay, s->username);
+}

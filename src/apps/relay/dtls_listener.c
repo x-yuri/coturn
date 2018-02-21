@@ -37,6 +37,8 @@
 #include "ns_turn_openssl.h"
 
 #include <pthread.h>
+#include <sys/syscall.h>
+#define gettid() syscall(SYS_gettid)
 
 /* #define REQUEST_CLIENT_CERT */
 
@@ -68,6 +70,14 @@ struct dtls_listener_relay_server_info {
   int slen0;
   ioa_engine_new_connection_event_handler connect_cb;
 };
+
+static void _print_server(char *prefix, dtls_listener_relay_server_type *s) {
+    char b1[20], b2[20];
+    (void)prefix; (void)s; (void)b1; (void)b2;   // in case dbgprintf expands to nothing
+    dbgprintf("%s: addr: %s, remote addr: %s\n", prefix,
+        ioa_addr_to_string(&s->addr, b1),
+        ioa_addr_to_string(&s->sm.m.sm.nd.src_addr, b2));
+}
 
 ///////////// forward declarations ////////
 
@@ -330,6 +340,7 @@ static int handle_udp_packet(dtls_listener_relay_server_type *server,
 	int verbose = ioa_eng->verbose;
 	ioa_socket_handle s = sm->m.sm.s;
 
+    dbgprintf("%li: handle_udp_packet\n", gettid());
 	ur_addr_map_value_type mvt = 0;
 	if(!(server->children_ss)) {
 		server->children_ss = (ur_addr_map*)allocate_super_memory_engine(server->e, sizeof(ur_addr_map));
@@ -341,11 +352,15 @@ static int handle_udp_packet(dtls_listener_relay_server_type *server,
 	if ((ur_addr_map_get(amap, &(sm->m.sm.nd.src_addr), &mvt) > 0) && mvt) {
 		chs = (ioa_socket_handle) mvt;
 	}
+    if (!chs) {
+        dbgprintf("%li: handle_udp_packet: no child socket yet\n", gettid());
+    }
 
 	if (chs && !ioa_socket_tobeclosed(chs)
 			&& (chs->sockets_container == amap)
 			&& (chs->magic == SOCKET_MAGIC)) {
 		s = chs;
+        dbgprintf("%li: handle_udp_packet: message: set socket\n", gettid());
 		sm->m.sm.s = s;
 		if(s->ssl) {
 			int sslret = ssl_read(s->fd, s->ssl, sm->m.sm.nd.nbh, verbose);
@@ -376,6 +391,7 @@ static int handle_udp_packet(dtls_listener_relay_server_type *server,
 		if(s && ioa_socket_check_bandwidth(s,sm->m.sm.nd.nbh,1)) {
 			s->e = ioa_eng;
 			if (s && s->read_cb && sm->m.sm.nd.nbh) {
+                dbgprintf("%li: handle_udp_packet: client_input_handler\n", gettid());
 				s->read_cb(s, IOA_EV_READ, &(sm->m.sm.nd), s->read_ctx, 1);
 				ioa_network_buffer_delete(ioa_eng, sm->m.sm.nd.nbh);
 				sm->m.sm.nd.nbh = NULL;
@@ -447,12 +463,19 @@ static int handle_udp_packet(dtls_listener_relay_server_type *server,
 #endif
 
 		if(!chs) {
+            char _b1[20], _b2[20];
+            (void)_b1; (void)_b2;   // in case dbgprintf expands to nothing
+            dbgprintf("%li: handle_udp_packet: create_ioa_socket_from_fd: udp: %s -> %s\n",
+                gettid(),
+                ioa_addr_to_string(get_remote_addr_from_ioa_socket(s), _b1),
+                ioa_addr_to_string(get_local_addr_from_ioa_socket(s), _b2));
 			chs = create_ioa_socket_from_fd(ioa_eng, s->fd, s,
 				UDP_SOCKET, CLIENT_SOCKET, &(sm->m.sm.nd.src_addr),
 				get_local_addr_from_ioa_socket(s));
 		}
 
 		s = chs;
+        dbgprintf("%li: handle_udp_packet: message: set socket\n", gettid());
 		sm->m.sm.s = s;
 
 		if (s) {
@@ -467,6 +490,7 @@ static int handle_udp_packet(dtls_listener_relay_server_type *server,
 			}
 			s->e = ioa_eng;
 			add_socket_to_map(s, amap);
+            dbgprintf("%li: handle_udp_packet: open_client_connection_session\n", gettid());
 			if(open_client_connection_session(ts, &(sm->m.sm))<0) {
 				return -1;
 			}
@@ -618,8 +642,26 @@ static int create_new_connected_udp_socket(
 	return server->connect_cb(server->e, &(server->sm));
 }
 
+static void _print_ioa_socket(char *prefix, ioa_socket_handle s) {
+    char buf1[80], buf2[20];
+    (void)prefix; (void)s; (void)buf1; (void)buf2;   // in case dbgprintf expands to nothing
+    dbgprintf("%s: parent: %i, family: %s\n\tsocket type: %s, app type: %s, connected: %i, ssl: %i\n",
+        prefix,
+        s->parent_s ? 1 : 0,
+        s->family == AF_INET ? "ipv4" : "<other>",
+        s->st == UDP_SOCKET ? "udp" : "<other>",
+        s->sat == LISTENER_SOCKET ? "listener" : "<other>",
+        s->connected, s->ssl ? 1 : 0);
+    dbgprintf("%s: %s -> %s\n",
+        prefix,
+        ioa_addr_to_string(&s->remote_addr, buf1),
+        ioa_addr_to_string(&s->local_addr, buf2));
+}
+
 static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 {
+    char _b[80];
+    (void)_b;   // in case dbgprintf expands to nothing
 	int cycle = 0;
 
 	dtls_listener_relay_server_type* server = (dtls_listener_relay_server_type*)arg;
@@ -627,6 +669,12 @@ static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 
 	FUNCSTART;
 
+    _print_server(
+        snprintfex(_b, "\n\n\n%li: udp_server_input_handler: server", gettid()),
+        server);
+    _print_ioa_socket(
+        snprintfex(_b, "%li: udp_server_input_handler: socket", gettid()),
+        s);
 	if (!(what & EV_READ)) {
 		return;
 	}
@@ -654,6 +702,13 @@ static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 			(s08bits*)ioa_network_buffer_data(elem), (int)ioa_network_buffer_get_capacity_udp(),
 			&(server->sm.m.sm.nd.recv_ttl), &(server->sm.m.sm.nd.recv_tos),
 			server->e->cmsg, flags, NULL);
+    char b1[20];
+    (void)b1;   // in case dbgprintf expands to nothing
+    dbgprintf("%li: udp_server_input_handler: remote addr: %s\n",
+        gettid(),
+        ioa_addr_to_string(&server->sm.m.sm.nd.src_addr, b1));
+    dbgprintf("%li: udp_server_input_handler: received packet: size: %li\n",
+        gettid(), bsize);
 
 	int conn_reset = is_connreset();
 	int to_block = would_block();
@@ -718,6 +773,8 @@ static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 
 		if(server->connect_cb) {
 
+            dbgprintf("%li: udp_server_input_handler: create_new_connected_udp_socket\n",
+                gettid());
 			rc = create_new_connected_udp_socket(server, s);
 			if(rc<0) {
 				TURN_LOG_FUNC(TURN_LOG_LEVEL_ERROR, "Cannot handle UDP packet, size %d\n",(int)bsize);
@@ -725,6 +782,7 @@ static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 
 		} else {
 			server->sm.m.sm.s = s;
+            dbgprintf("%li: udp_server_input_handler: handle_udp_packet\n", gettid());
 			rc = handle_udp_packet(server, &(server->sm), server->e, server->ts);
 		}
 
@@ -740,6 +798,9 @@ static void udp_server_input_handler(evutil_socket_t fd, short what, void* arg)
 
 	if((bsize>0) && (cycle++<MAX_SINGLE_UDP_BATCH))
 		goto start_udp_cycle;
+
+    dbgprintf("%li: udp_server_input_handler: end\n",
+        gettid());
 
 	FUNCEND;
 }

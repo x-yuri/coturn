@@ -57,16 +57,17 @@ typedef struct _turnports turnports;
 
 /////////////// TURNPORTS statics //////////////////////////
 
-static turnports* turnports_create(super_memory_t *sm, u16bits start, u16bits end);
+static turnports* turnports_create(super_memory_t *sm, u16bits start, u16bits end, uint16_t remote_port);
 static u16bits turnports_size(turnports* tp);
 
-static int turnports_allocate(turnports* tp);
+static int turnports_allocate(turnports* tp, uint16_t remote_port);
 static int turnports_allocate_even(turnports* tp, int allocate_rtcp, u64bits *reservation_token);
 
 static void turnports_release(turnports* tp, u16bits port);
 
 static int turnports_is_allocated(turnports* tp, u16bits port);
 static int turnports_is_available(turnports* tp, u16bits port);
+static void turnports_dump(turnports *tp, uint16_t remote_port);
 
 /////////////// UTILS //////////////////////////////////////
 
@@ -106,7 +107,8 @@ static void turnports_randomize(turnports* tp) {
   }
 }   
 
-static void turnports_init(turnports* tp, u16bits start, u16bits end) {
+static void turnports_init(turnports* tp, u16bits start, u16bits end, uint16_t remote_port) {
+(void)remote_port;
 
   tp->low=start;
   tp->high=((u32bits)end)+1;
@@ -129,18 +131,28 @@ static void turnports_init(turnports* tp, u16bits start, u16bits end) {
   }
 
   turnports_randomize(tp);
+  /* turnports_dump(tp, remote_port); */
 
   TURN_MUTEX_INIT_RECURSIVE(&(tp->mutex));
 }
 
 /////////////// FUNC ///////////////////////////////////////
 
-turnports* turnports_create(super_memory_t *sm, u16bits start, u16bits end) {
+static volatile int dump_turnports = 0;
+
+static void sigusr1_callback_handler(int signum) {
+    (void)signum;
+    dump_turnports = 1;
+}
+
+turnports* turnports_create(super_memory_t *sm, u16bits start, u16bits end, uint16_t remote_port) {
 
   if(start>end) return NULL;
 
+    signal(SIGUSR1, sigusr1_callback_handler);
+
   turnports* ret=(turnports*)allocate_super_memory_region(sm, sizeof(turnports));
-  turnports_init(ret,start,end);
+  turnports_init(ret,start,end, remote_port);
 
   return ret;
 }
@@ -155,11 +167,17 @@ u16bits turnports_size(turnports* tp) {
   }
 }
 
-int turnports_allocate(turnports* tp) {
+int turnports_allocate(turnports* tp, uint16_t remote_port) {
 
   int port=-1;
 
   TURN_MUTEX_LOCK(&tp->mutex);
+  inc_file_counter("/var/log/turn_n_allocate");
+
+  if (dump_turnports) {
+    turnports_dump(tp, remote_port);
+    dump_turnports = 0;
+  }
 
   if(tp) {
 
@@ -167,6 +185,7 @@ int turnports_allocate(turnports* tp) {
       
       if(tp->high <= tp->low) {
     	  TURN_MUTEX_UNLOCK(&tp->mutex);
+          dlog("%hu: turnports_allocate: tp->low: %u, tp->high: %u", remote_port, tp->low, tp->high);
     	  return -1;
       }
       
@@ -175,6 +194,7 @@ int turnports_allocate(turnports* tp) {
       port=(int)tp->ports[position];
       if(port<(int)(tp->range_start) || port>((int)(tp->range_stop))) {
     	  TURN_MUTEX_UNLOCK(&tp->mutex);
+          dlog("%hu: turnports_allocate: port: %i, tp->range_start: %hu, tp->range_stop: %hu", remote_port, port, tp->range_start, tp->range_stop);
     	  return -1;
       }
       if(is_taken(tp->status[port])) {
@@ -216,7 +236,7 @@ int turnports_allocate_even(turnports* tp, int allocate_rtcp, u64bits *reservati
     if(size>1) {
       u16bits i=0;
       for(i=0;i<size;i++) {
-    	  int port=turnports_allocate(tp);
+    	  int port=turnports_allocate(tp, 0);
     	  if(port & 0x00000001) {
     		  turnports_release(tp,port);
     	  } else {
@@ -277,6 +297,112 @@ int turnports_is_available(turnports* tp, u16bits port) {
   return 0;
 }
 
+/*
+#define STATUS_TO_STRING_MSG "<error>"
+static char *status_to_string(u32bits status, char *buf, size_t sz) {
+    strncpyex(buf, STATUS_TO_STRING_MSG, sz);
+    switch (status) {
+    case TPS_OUT_OF_RANGE:
+        snprintf(buf, sz, "out of range");
+        return buf;
+    case TPS_TAKEN_SINGLE:
+        snprintf(buf, sz, "taken, single");
+        return buf;
+    case TPS_TAKEN_EVEN:
+        snprintf(buf, sz, "taken, even");
+        return buf;
+    case TPS_TAKEN_ODD:
+        snprintf(buf, sz, "taken, odd");
+        return buf;
+    default:
+        snprintf(buf, sz, "%u", status);
+        return buf;
+    }
+}
+*/
+
+#define status_to_string(tp, port) \
+    status_out_of_range(tp, port) ? "out of range" \
+    : status_taken(tp, port) ? "taken" \
+    : status_available(tp, port) ? "available" \
+    : "invalid"
+#define status_out_of_range(tp, port) \
+    tp->status[port] == TPS_OUT_OF_RANGE
+#define status_taken(tp, port) \
+    (tp->status[port] == TPS_TAKEN_SINGLE \
+        || tp->status[port] == TPS_TAKEN_EVEN \
+        || tp->status[port] == TPS_TAKEN_ODD)
+#define status_available(tp, port) \
+    tp->ports[tp->status[port] & 0xFFFF] == port
+#define status_invalid(tp, port) \
+    (! status_out_of_range(tp, port) \
+    && ! status_taken(tp, port) \
+    && ! status_available(tp, port))
+
+#define TURNPORTS_DUMP_BUFSIZE 2000000
+static void turnports_dump(turnports *tp, uint16_t remote_port) {
+    char s[TURNPORTS_DUMP_BUFSIZE], *p;
+    int r, port, n_out_of_range, n_taken, n_available, n_invalid, n_port_out_of_range;
+    u32bits i;
+
+    p = s;
+    n_out_of_range = n_taken = n_available = n_invalid = 0;
+    for (port = tp->range_start; port <= tp->range_stop; port++) {
+        if (status_out_of_range(tp, port)) n_out_of_range++;
+        if (status_taken(tp, port)) n_taken++;
+        if (status_available(tp, port)) n_available++;
+        if (status_invalid(tp, port)) n_invalid++;
+        /*
+        r = snprintf(p, TURNPORTS_DUMP_BUFSIZE - (p - s), "%i: %s\n",
+            port,
+            status_to_string(tp, port));
+        p += r;
+        */
+    }
+    r = snprintf(p, TURNPORTS_DUMP_BUFSIZE - (p - s), "--- status scan\n");
+    p += r;
+    r = snprintf(p, TURNPORTS_DUMP_BUFSIZE - (p - s),
+        "out of range: %i, taken: %i, available: %i, invalid: %i\n",
+        n_out_of_range, n_taken, n_available, n_invalid);
+    p += r;
+
+    n_out_of_range = n_taken = n_available = n_invalid = n_port_out_of_range = 0;
+    for (i = tp->low; i < tp->high; i++) {
+        int port = tp->ports[i & 0xFFFF];
+        if (status_out_of_range(tp, port)) n_out_of_range++;
+        if (status_taken(tp, port)) n_taken++;
+        if (status_available(tp, port)) n_available++;
+        if (status_invalid(tp, port)) n_invalid++;
+        if (port < tp->range_start || port > tp->range_stop) n_port_out_of_range++;
+        if (
+            status_out_of_range(tp, port)
+            || status_taken(tp, port)
+            || status_invalid(tp, port)
+            || port < tp->range_start
+            || port > tp->range_stop
+        ) {
+            r = snprintf(p, TURNPORTS_DUMP_BUFSIZE - (p - s), "%i: %s\n",
+                port,
+                port < tp->range_start
+                || port > tp->range_stop
+                    ? "port out of range"
+                    : status_to_string(tp, port));
+            p += r;
+        }
+    }
+    r = snprintf(p, TURNPORTS_DUMP_BUFSIZE - (p - s), "--- port scan\n");
+    p += r;
+    r = snprintf(p, TURNPORTS_DUMP_BUFSIZE - (p - s),
+        "out of range: %i, taken: %i, available: %i, invalid: %i, port out of range: %i",
+        n_out_of_range, n_taken, n_available, n_invalid, n_port_out_of_range);
+    p += r;
+
+    dlog("%hu: turnports: range_start: %hu, range_stop: %hu\nlow: %u, high: %u, size: %hu\n%s",
+        remote_port, tp->range_start, tp->range_stop,
+        tp->low, tp->high, turnports_size(tp),
+        s);
+}
+
 /////////////////// IP-mapped PORTS /////////////////////////////////////
 
 struct _turnipports
@@ -314,18 +440,30 @@ turnipports* turnipports_create(super_memory_t *sm, u16bits start, u16bits end)
 	return ret;
 }
 
-static turnports* turnipports_add(turnipports* tp, u08bits transport, const ioa_addr *backend_addr)
+static turnports* turnipports_add(turnipports* tp, u08bits transport, const ioa_addr *backend_addr, uint16_t remote_port)
 {
 	ur_addr_map_value_type t = 0;
 	if (tp && backend_addr) {
 		ioa_addr ba;
 		addr_cpy(&ba, backend_addr);
 		addr_set_port(&ba, 0);
+        char _s[60];
 		TURN_MUTEX_LOCK((const turn_mutex*)&(tp->mutex));
 		if (!ur_addr_map_get(get_map(tp, transport), &ba, &t)) {
-			t = (ur_addr_map_value_type) turnports_create(tp->sm, tp->start, tp->end);
+			t = (ur_addr_map_value_type) turnports_create(tp->sm, tp->start, tp->end, remote_port);
+            turnports *t2 = (turnports *)t;
+            dlog("%hu: created turnports: %s: %hu, %hu, %u, %u",
+                remote_port,
+                ioa_addr_to_string(&ba, _s),
+                t2->range_start, t2->range_stop, t2->low, t2->high);
 			ur_addr_map_put(get_map(tp, transport), &ba, t);
-		}
+		} else {
+            turnports *t2 = (turnports *)t;
+            dlog("%hu: got turnports: %s: %hu, %hu, %u, %u",
+                remote_port,
+                ioa_addr_to_string(&ba, _s),
+                t2->range_start, t2->range_stop, t2->low, t2->high);
+        }
 		TURN_MUTEX_UNLOCK((const turn_mutex*)&(tp->mutex));
 	}
 	return (turnports*) t;
@@ -333,16 +471,17 @@ static turnports* turnipports_add(turnipports* tp, u08bits transport, const ioa_
 
 void turnipports_add_ip(u08bits transport, const ioa_addr *backend_addr)
 {
-	turnipports_add(turnipports_singleton, transport, backend_addr);
+	turnipports_add(turnipports_singleton, transport, backend_addr, 0);
 }
 
-int turnipports_allocate(turnipports* tp, u08bits transport, const ioa_addr *backend_addr)
+int turnipports_allocate(turnipports* tp, u08bits transport, const ioa_addr *backend_addr, uint16_t remote_port)
 {
 	int ret = -1;
 	if (tp && backend_addr) {
 		TURN_MUTEX_LOCK((const turn_mutex*)&(tp->mutex));
-		turnports *t = turnipports_add(tp, transport, backend_addr);
-		ret = turnports_allocate(t);
+		turnports *t = turnipports_add(tp, transport, backend_addr, remote_port);
+		ret = turnports_allocate(t, remote_port);
+        dlog("%hu: turnports_allocate: %i", remote_port, ret);
 		TURN_MUTEX_UNLOCK((const turn_mutex*)&(tp->mutex));
 	}
 	return ret;
@@ -354,7 +493,7 @@ int turnipports_allocate_even(turnipports* tp, const ioa_addr *backend_addr, int
 	int ret = -1;
 	if (tp && backend_addr) {
 		TURN_MUTEX_LOCK((const turn_mutex*)&(tp->mutex));
-		turnports *t = turnipports_add(tp, STUN_ATTRIBUTE_TRANSPORT_UDP_VALUE, backend_addr);
+		turnports *t = turnipports_add(tp, STUN_ATTRIBUTE_TRANSPORT_UDP_VALUE, backend_addr, 0);
 		ret = turnports_allocate_even(t, allocate_rtcp, reservation_token);
 		TURN_MUTEX_UNLOCK((const turn_mutex*)&(tp->mutex));
 	}

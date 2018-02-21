@@ -109,6 +109,7 @@ struct _ts_ur_super_session {
   /* Bandwidth */
   band_limit_t bps;
 };
+void _print_session(char *prefix, ts_ur_super_session *s);
 
 ////// Session info for statistics //////
 
